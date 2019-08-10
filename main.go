@@ -9,6 +9,9 @@ import (
 	"strconv"
 	"github.com/pborman/uuid"
 	"reflect"
+	"context"
+	"cloud.google.com/go/storage"
+	"io"
 )
 type Location struct {
 	Lat float64 `json:"lat"`
@@ -18,12 +21,14 @@ type Post struct {
 	User string `json:"user"`
 	Message string `json:"message"`
 	Location Location `json:"location"`
+	Url string `json:"url"`
 }
 const(
 	DISTANCE = "200km"
 	INDEX  = "around"
 	TYPE = "post"
-	ES_URL = "http://35.235.77.233:9200"
+	ES_URL = "http://35.236.7.246:9200"
+	BUCKET_NAME = "post-images-2491211"
 	)
 
 func main(){
@@ -140,22 +145,74 @@ func handlerSearch(w http.ResponseWriter, r *http.Request){
 
 
 func handlerPost(w http.ResponseWriter, r *http.Request){
-	fmt.Println("Received one post request.")
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 
-	decoder := json.NewDecoder(r.Body)
-	var p Post
-	if err := decoder.Decode(&p); err != nil {
+	r.ParseMultipartForm(32 << 20)
+	fmt.Println("Received one post request %s\n", r.FormValue("message"))
+	lat,_  := strconv.ParseFloat(r.FormValue("lat"), 64)
+	lon, _ := strconv.ParseFloat(r.FormValue("lon"), 64)
+
+	p := &Post{
+		User: "1111",
+		Message: r.FormValue("message"),
+		Location: Location{
+			Lat: lat,
+			Lon: lon,
+		},
+	}
+	id := uuid.New()
+	file, _, err:= r.FormFile("image")
+	if err != nil {
+		http.Error(w, "GCS is not setup", http.StatusInternalServerError)
+		fmt.Printf("GCS is not setup %v\n", err)
 		panic(err)
 	}
-	fmt.Fprintf(w, "Post received : %s\n", p.Message)
-	id := uuid.New()
-	saveToES(&p, id)
+	defer file.Close()
+	ctx := context.Background()
+	_, attrs, err := saveToGCS(ctx, file, BUCKET_NAME, id)
+	if err != nil {
+		http.Error(w, "GCS IS NOT SETUP", http.StatusInternalServerError)
+		fmt.Printf("GCS IS NOT SETUP %v\n", err)
+		panic(err)
+	}
+	p.Url = attrs.MediaLink
+
+
 
 
 
 
 }
+func saveToGCS(ctx context.Context, r io.Reader, bucketName, name string) (*storage.ObjectHandle, *storage.ObjectAttrs, error){
+	client, err := storage.NewClient(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer client.Close()
 
+	bucket := client.Bucket(bucketName)
+	if _, err := bucket.Attrs(ctx); err != nil {
+		return nil, nil, err
+	}
+	obj := bucket.Object(name)
+	wc := obj.NewWriter(ctx)
+	if _, err = io.Copy(wc, r); err != nil{
+		return nil, nil, err
+	}
+	if err:= wc.Close(); err != nil{
+		return nil, nil, err
+	}
+	if err:= obj.ACL().Set(ctx, storage.AllUsers, storage.RoleReader); err != nil{
+		return nil, nil, err
+	}
+	attrs, err := obj.Attrs(ctx)
+	fmt.Printf("Post is save to GCS: %s\n", attrs.MediaLink)
+	return obj, attrs, err
+
+
+}
 
 func saveToES(p *Post, id string){
 	es_client, err := elastic.NewClient(elastic.SetURL(ES_URL),
